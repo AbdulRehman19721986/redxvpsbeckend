@@ -1,6 +1,6 @@
-FROM node:18
+FROM node:20
 
-# Install git
+# Install git (required for cloning)
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
