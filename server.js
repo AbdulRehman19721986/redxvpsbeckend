@@ -108,23 +108,61 @@ async function cloneRepo(githubUsername, appName) {
   }
 }
 
-// Install dependencies with better error handling
+// Fix package.json: remove discard-api if present
+function fixPackageJson(botPath) {
+  const pkgPath = path.join(botPath, 'package.json');
+  if (!fs.existsSync(pkgPath)) {
+    return { success: false, error: 'package.json not found' };
+  }
+
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    let modified = false;
+
+    // Check dependencies
+    if (pkg.dependencies && pkg.dependencies['discard-api']) {
+      delete pkg.dependencies['discard-api'];
+      modified = true;
+      console.log(`Removed discard-api from dependencies of ${botPath}`);
+    }
+    // Check devDependencies
+    if (pkg.devDependencies && pkg.devDependencies['discard-api']) {
+      delete pkg.devDependencies['discard-api'];
+      modified = true;
+      console.log(`Removed discard-api from devDependencies of ${botPath}`);
+    }
+
+    if (modified) {
+      fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+      return { success: true, fixed: true };
+    }
+    return { success: true, fixed: false };
+  } catch (err) {
+    console.error('Error fixing package.json:', err.message);
+    return { success: false, error: 'Invalid package.json: ' + err.message };
+  }
+}
+
+// Install dependencies with auto-fix
 async function installDependencies(botPath) {
+  // First, fix package.json
+  const fixResult = fixPackageJson(botPath);
+  if (!fixResult.success) {
+    return { success: false, error: fixResult.error };
+  }
+
   try {
     // Use --no-audit --no-fund to reduce noise, and --force to bypass some errors
     await execPromise('npm install --no-audit --no-fund --force', { cwd: botPath });
-    return { success: true };
+    return { success: true, fixed: fixResult.fixed };
   } catch (err) {
     console.error('npm install error:', err.message);
-    // Check for specific error about discard-api
-    if (err.message.includes('discard-api') || err.message.includes('No versions available')) {
-      return { 
-        success: false, 
-        error: 'Your bot repository contains a dependency "discard-api" which does not exist on npm. Please remove it from package.json and try again.',
-        details: err.message
-      };
-    }
-    return { success: false, error: 'npm install failed: ' + err.message };
+    // If still failing, return detailed error
+    return { 
+      success: false, 
+      error: 'npm install failed: ' + err.message,
+      details: err.message
+    };
   }
 }
 
@@ -207,7 +245,7 @@ app.post('/deploy', async (req, res) => {
   }).map(([k, v]) => `${k}=${v}`).join('\n');
   fs.writeFileSync(path.join(botPath, '.env'), envContent);
 
-  // Install dependencies
+  // Install dependencies (with auto-fix)
   const installResult = await installDependencies(botPath);
   if (!installResult.success) {
     // Clean up the cloned folder to avoid clutter
@@ -227,7 +265,11 @@ app.post('/deploy', async (req, res) => {
   await pool.query('INSERT INTO bots (app_name, github_username) VALUES ($1, $2)', [appName, githubUsername.toLowerCase()]);
   await pool.query('UPDATE servers SET bot_count = bot_count + 1 WHERE id = 1');
 
-  res.json({ success: true, appName });
+  // If we fixed package.json, include a warning in the response
+  const message = installResult.fixed 
+    ? 'Bot deployed successfully (note: removed "discard-api" from package.json)'
+    : 'Bot deployed successfully';
+  res.json({ success: true, appName, message });
 });
 
 app.post('/restart-app', async (req, res) => {
