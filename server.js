@@ -8,11 +8,11 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
 // -------------------- CONFIG --------------------
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'redx';
+let ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'redx'; // mutable via admin panel
 const HEROKU_API_KEY = process.env.HEROKU_API_KEY; // Your Heroku API key
 const HEROKU_API_BASE = 'https://api.heroku.com';
 const HEROKU_HEADERS = {
@@ -31,6 +31,7 @@ const pool = new Pool({
 async function migrateDb() {
   const client = await pool.connect();
   try {
+    // Users table
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         github_username TEXT PRIMARY KEY,
@@ -43,18 +44,11 @@ async function migrateDb() {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    // Add missing columns if needed (simplified)
-    await client.query(`
-      DO $$ BEGIN
-        ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT false;
-      EXCEPTION WHEN duplicate_column THEN END; $$;
-    `);
-    await client.query(`
-      DO $$ BEGIN
-        ALTER TABLE users ADD COLUMN deployment_count INTEGER DEFAULT 0;
-      EXCEPTION WHEN duplicate_column THEN END; $$;
-    `);
+    // Add missing columns safely
+    await client.query(`DO $$ BEGIN ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT false; EXCEPTION WHEN duplicate_column THEN END; $$;`);
+    await client.query(`DO $$ BEGIN ALTER TABLE users ADD COLUMN deployment_count INTEGER DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END; $$;`);
 
+    // Bots table
     await client.query(`
       CREATE TABLE IF NOT EXISTS bots (
         app_name TEXT PRIMARY KEY,
@@ -65,6 +59,7 @@ async function migrateDb() {
       );
     `);
 
+    // Plans table
     await client.query(`
       CREATE TABLE IF NOT EXISTS plans (
         id SERIAL PRIMARY KEY,
@@ -156,6 +151,15 @@ async function createHerokuBuild(appName, githubUsername) {
     return { success: false, error: err.response?.data?.message || err.message };
   }
 }
+
+// -------------------- ROOT ROUTE --------------------
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'REDX Bot Deployer Backend',
+    status: 'running',
+    endpoints: ['/api/health', '/api/plans', '/check-fork', '/deploy', '/admin/login', '/admin/update-password']
+  });
+});
 
 // -------------------- API ROUTES --------------------
 
@@ -255,7 +259,6 @@ app.post('/deploy', async (req, res) => {
   // Set config vars
   const configResult = await setHerokuConfig(herokuAppName, configVars);
   if (!configResult.success) {
-    // Clean up: delete the app? We'll just return error
     return res.status(500).json({ error: 'Failed to set config: ' + configResult.error });
   }
 
@@ -283,26 +286,18 @@ app.post('/deploy', async (req, res) => {
   });
 });
 
-// Get bot logs (Heroku logs)
+// Get bot logs (Heroku logs) – placeholder
 app.post('/bot-logs', async (req, res) => {
   const { appName } = req.body;
-  try {
-    // Heroku logs API: GET /apps/{app_id}/log-sessions
-    // This is more complex; we'll return a placeholder for now
-    res.json({ success: true, logs: 'Logs feature not yet implemented. Check Heroku dashboard.' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json({ success: true, logs: 'Logs feature not yet implemented. Check Heroku dashboard.' });
 });
 
 app.post('/restart-app', async (req, res) => {
   const { appName } = req.body;
-  // Get heroku app name from DB
   const bot = await pool.query('SELECT heroku_app_name FROM bots WHERE app_name = $1', [appName]);
   if (bot.rows.length === 0) return res.status(404).json({ error: 'Bot not found' });
   const herokuAppName = bot.rows[0].heroku_app_name;
   try {
-    // Restart dynos: DELETE /apps/{app_id}/dynos
     await axios.delete(`${HEROKU_API_BASE}/apps/${herokuAppName}/dynos`, { headers: HEROKU_HEADERS });
     res.json({ success: true, message: 'Restarted' });
   } catch (err) {
@@ -337,6 +332,18 @@ app.post('/admin/login', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) return res.json({ success: true });
   res.status(401).json({ error: 'Invalid password' });
+});
+
+// Change admin password
+app.post('/admin/update-password', (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (currentPassword !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  ADMIN_PASSWORD = newPassword;
+  // In production, you'd store this in an environment variable or database.
+  // For Railway, you'd need to update the environment variable via API – here we just update in memory.
+  res.json({ success: true, message: 'Password updated (memory only). For permanent change, update env variable.' });
 });
 
 app.post('/admin/users', async (req, res) => {
